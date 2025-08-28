@@ -8,7 +8,7 @@ use instructions::*;
 use state::*;
 use errors::*;
 
-declare_id!("7XJkGrdSHn3chc7rsv1xDzEKtwP9w5rSx1shohzM5skv");
+declare_id!("3r5NUnG85XtVExb1234ZYYyUazjchqjfYknnQATyCDzp");
 
 #[program]
 pub mod crowdfunding {
@@ -18,11 +18,11 @@ pub mod crowdfunding {
         instructions::create(ctx, name, description)
     }
 
-    pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
-        instructions::withdraw(ctx, amount)
+    pub fn withdraw(ctx: Context<Withdraw>, name: String, amount: u64) -> Result<()> {
+        instructions::withdraw(ctx, name, amount)
     }
 
-    pub fn donate(ctx: Context<Donate>, amount: u64) -> Result<()> {
-        instructions::donate(ctx, amount)
+    pub fn donate(ctx: Context<Donate>, name: String, amount: u64) -> Result<()> {
+        instructions::donate(ctx, name, amount)
     }
 }

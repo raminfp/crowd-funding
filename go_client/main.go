@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	ProgramID = "7GMjTXTH1KS1Q46ngEnUYakAJi4xb2KJ3JsbJW2UNpHC"
+	ProgramID = "3r5NUnG85XtVExb1234ZYYyUazjchqjfYknnQATyCDzp"
 	Network   = rpc.DevNet_RPC
 )
 
@@ -35,6 +35,7 @@ type Campaign struct {
 	Name          string           `json:"name"`
 	Description   string           `json:"description"`
 	AmountDonated uint64           `json:"amount_donated"`
+	Bump          uint8            `json:"bump"`
 }
 
 // SolanaDApp represents our dApp instance
@@ -44,6 +45,7 @@ type SolanaDApp struct {
 	wallet          *Wallet
 	programID       solana.PublicKey
 	campaignAddress *solana.PublicKey // Current campaign address
+	campaignName    string            // Current campaign name
 }
 
 // Wallet represents a Solana wallet
@@ -133,53 +135,79 @@ func NewSolanaDApp(keyPath string) (*SolanaDApp, error) {
 		wallet:    wallet,
 		programID: programID,
 	}
-	
+
 	// Try to load saved campaign address
 	app.loadSavedCampaign()
-	
-	// If no saved campaign, check if one exists for this wallet
-	if app.campaignAddress == nil {
-		if existingCampaign, err := app.CheckExistingCampaign(); err == nil && existingCampaign != nil {
-			app.campaignAddress = existingCampaign
-			app.saveCampaign()
-			fmt.Printf("📋 Found existing campaign: %s\n", existingCampaign.String())
-		}
-	}
-	
+
+	// Note: We can't check for existing campaigns here without campaign name
+	// Users will need to provide campaign name to check for existing campaigns
+
 	return app, nil
 }
 
-// loadSavedCampaign tries to load a previously saved campaign address
+// SavedCampaign represents saved campaign data
+type SavedCampaign struct {
+	Address string `json:"address"`
+	Name    string `json:"name"`
+}
+
+// loadSavedCampaign tries to load a previously saved campaign address and name
 func (app *SolanaDApp) loadSavedCampaign() {
 	data, err := os.ReadFile("campaign.txt")
 	if err != nil {
 		return // No saved campaign, which is fine
 	}
-	
+
 	campaignStr := strings.TrimSpace(string(data))
 	if campaignStr == "" {
 		return
 	}
-	
-	campaignPubkey, err := solana.PublicKeyFromBase58(campaignStr)
-	if err != nil {
-		log.Printf("Warning: invalid saved campaign address: %v", err)
-		return
+
+	// Try to parse as JSON first (new format)
+	var savedCampaign SavedCampaign
+	if err := json.Unmarshal([]byte(campaignStr), &savedCampaign); err == nil {
+		// New format with name
+		campaignPubkey, err := solana.PublicKeyFromBase58(savedCampaign.Address)
+		if err != nil {
+			log.Printf("Warning: invalid saved campaign address: %v", err)
+			return
+		}
+		app.campaignAddress = &campaignPubkey
+		app.campaignName = savedCampaign.Name
+		fmt.Printf("📋 Loaded saved campaign '%s': %s\n", savedCampaign.Name, savedCampaign.Address)
+	} else {
+		// Old format - just address
+		campaignPubkey, err := solana.PublicKeyFromBase58(campaignStr)
+		if err != nil {
+			log.Printf("Warning: invalid saved campaign address: %v", err)
+			return
+		}
+		app.campaignAddress = &campaignPubkey
+		app.campaignName = "" // Unknown name for old saves
+		fmt.Printf("📋 Loaded saved campaign: %s (name unknown)\n", campaignStr)
 	}
-	
-	app.campaignAddress = &campaignPubkey
-	fmt.Printf("📋 Loaded saved campaign: %s\n", campaignStr)
 }
 
-// saveCampaign saves the current campaign address to a file
+// saveCampaign saves the current campaign address and name to a file
 func (app *SolanaDApp) saveCampaign() {
 	if app.campaignAddress == nil {
 		return
 	}
-	
-	err := os.WriteFile("campaign.txt", []byte(app.campaignAddress.String()), 0644)
+
+	savedCampaign := SavedCampaign{
+		Address: app.campaignAddress.String(),
+		Name:    app.campaignName,
+	}
+
+	data, err := json.Marshal(savedCampaign)
 	if err != nil {
-		log.Printf("Warning: failed to save campaign address: %v", err)
+		log.Printf("Warning: failed to marshal campaign data: %v", err)
+		return
+	}
+
+	err = os.WriteFile("campaign.txt", data, 0644)
+	if err != nil {
+		log.Printf("Warning: failed to save campaign data: %v", err)
 	}
 }
 
@@ -220,7 +248,7 @@ func (app *SolanaDApp) RequestAirdrop() error {
 	if err != nil {
 		return fmt.Errorf("failed to confirm airdrop: %w", err)
 	}
-	
+
 	if len(status.Value) > 0 && status.Value[0] != nil && status.Value[0].Err != nil {
 		return fmt.Errorf("airdrop transaction failed: %v", status.Value[0].Err)
 	}
@@ -230,18 +258,19 @@ func (app *SolanaDApp) RequestAirdrop() error {
 }
 
 // CreateCampaignPDA generates the Program Derived Address for a campaign
-func (app *SolanaDApp) CreateCampaignPDA() (solana.PublicKey, uint8, error) {
+func (app *SolanaDApp) CreateCampaignPDA(campaignName string) (solana.PublicKey, uint8, error) {
 	seeds := [][]byte{
 		[]byte("CAMPAIGN_DEMO"),
 		app.wallet.PublicKey.Bytes(),
+		[]byte(campaignName),
 	}
 
 	return solana.FindProgramAddress(seeds, app.programID)
 }
 
-// CheckExistingCampaign checks if a properly initialized campaign already exists for this wallet
-func (app *SolanaDApp) CheckExistingCampaign() (*solana.PublicKey, error) {
-	campaignPDA, _, err := app.CreateCampaignPDA()
+// CheckExistingCampaign checks if a properly initialized campaign already exists for this wallet and campaign name
+func (app *SolanaDApp) CheckExistingCampaign(campaignName string) (*solana.PublicKey, error) {
+	campaignPDA, _, err := app.CreateCampaignPDA(campaignName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create campaign PDA: %w", err)
 	}
@@ -258,7 +287,7 @@ func (app *SolanaDApp) CheckExistingCampaign() (*solana.PublicKey, error) {
 
 	// Check if the account is owned by our program (not just allocated by system program)
 	if !accountInfo.Value.Owner.Equals(app.programID) {
-		fmt.Printf("⚠️  Found uninitialized account at %s (owned by %s, not %s)\n", 
+		fmt.Printf("⚠️  Found uninitialized account at %s (owned by %s, not %s)\n",
 			campaignPDA.String(), accountInfo.Value.Owner.String(), app.programID.String())
 		return nil, nil // Account exists but not initialized by our program
 	}
@@ -274,8 +303,8 @@ func (app *SolanaDApp) CheckExistingCampaign() (*solana.PublicKey, error) {
 }
 
 // CheckCampaignStatus provides detailed status information about the campaign account
-func (app *SolanaDApp) CheckCampaignStatus() error {
-	campaignPDA, _, err := app.CreateCampaignPDA()
+func (app *SolanaDApp) CheckCampaignStatus(campaignName string) error {
+	campaignPDA, _, err := app.CreateCampaignPDA(campaignName)
 	if err != nil {
 		return fmt.Errorf("failed to create campaign PDA: %w", err)
 	}
@@ -313,6 +342,7 @@ func (app *SolanaDApp) CheckCampaignStatus() error {
 		if len(accountInfo.Value.Data.GetBinary()) >= 32 {
 			fmt.Println("✅ Account appears to have campaign data")
 			app.campaignAddress = &campaignPDA
+			app.campaignName = campaignName
 			app.saveCampaign()
 		} else {
 			fmt.Println("⚠️  Account is owned by program but has insufficient data")
@@ -327,7 +357,7 @@ func (app *SolanaDApp) CheckCampaignStatus() error {
 // CreateCampaign creates a new fundraising campaign
 func (app *SolanaDApp) CreateCampaign(name, description string) error {
 	// First, check if a campaign already exists
-	existingCampaign, err := app.CheckExistingCampaign()
+	existingCampaign, err := app.CheckExistingCampaign(name)
 	if err != nil {
 		return fmt.Errorf("failed to check existing campaign: %w", err)
 	}
@@ -335,6 +365,7 @@ func (app *SolanaDApp) CreateCampaign(name, description string) error {
 	if existingCampaign != nil {
 		fmt.Printf("✅ Campaign already exists at: %s\n", existingCampaign.String())
 		app.campaignAddress = existingCampaign
+		app.campaignName = name
 		app.saveCampaign()
 		fmt.Println("📋 Using existing campaign for future operations!")
 		return nil
@@ -342,7 +373,7 @@ func (app *SolanaDApp) CreateCampaign(name, description string) error {
 
 	fmt.Printf("Creating campaign: %s\n", name)
 
-	campaignPDA, _, err := app.CreateCampaignPDA()
+	campaignPDA, _, err := app.CreateCampaignPDA(name)
 	if err != nil {
 		return fmt.Errorf("failed to create campaign PDA: %w", err)
 	}
@@ -350,7 +381,7 @@ func (app *SolanaDApp) CreateCampaign(name, description string) error {
 	// Build the instruction data for Anchor program
 	// Generate the correct discriminator for the "create" instruction
 	instructionData := generateDiscriminator("global", "create")
-	
+
 	// Serialize name length and name (u32 + string)
 	nameLen := uint32(len(name))
 	nameLenBytes := make([]byte, 4)
@@ -359,7 +390,7 @@ func (app *SolanaDApp) CreateCampaign(name, description string) error {
 	}
 	instructionData = append(instructionData, nameLenBytes...)
 	instructionData = append(instructionData, []byte(name)...)
-	
+
 	// Serialize description length and description (u32 + string)
 	descLen := uint32(len(description))
 	descLenBytes := make([]byte, 4)
@@ -427,23 +458,32 @@ func (app *SolanaDApp) CreateCampaign(name, description string) error {
 
 	fmt.Printf("Campaign created! Transaction: %s\n", sig)
 	fmt.Printf("Campaign address: %s\n", campaignPDA.String())
-	
-	// Store the campaign address for future use
+
+	// Store the campaign address and name for future use
 	app.campaignAddress = &campaignPDA
+	app.campaignName = name
 	app.saveCampaign()
-	fmt.Printf("✅ Campaign address saved for quick access!\n")
+	fmt.Printf("✅ Campaign address and name saved for quick access!\n")
 
 	return nil
 }
 
 // DonateToCampaign donates SOL to a campaign
-func (app *SolanaDApp) DonateToCampaign(campaignAddress string, amount uint64) error {
+func (app *SolanaDApp) DonateToCampaign(campaignName, campaignAddress string, amount uint64) error {
 	fmt.Printf("Donating %d lamports to campaign %s\n", amount, campaignAddress)
 
 	campaignPubkey := solana.MustPublicKeyFromBase58(campaignAddress)
 
 	// Build donate instruction with proper discriminator
 	instructionData := generateDiscriminator("global", "donate")
+	// Add name length and name (u32 + string)
+	nameLen := uint32(len(campaignName))
+	nameLenBytes := make([]byte, 4)
+	for i := 0; i < 4; i++ {
+		nameLenBytes[i] = byte(nameLen >> (i * 8))
+	}
+	instructionData = append(instructionData, nameLenBytes...)
+	instructionData = append(instructionData, []byte(campaignName)...)
 	// Add amount as 8 bytes (little endian)
 	amountBytes := make([]byte, 8)
 	for i := 0; i < 8; i++ {
@@ -478,13 +518,21 @@ func (app *SolanaDApp) DonateToCampaign(campaignAddress string, amount uint64) e
 }
 
 // WithdrawFromCampaign withdraws SOL from a campaign (only campaign admin can do this)
-func (app *SolanaDApp) WithdrawFromCampaign(campaignAddress string, amount uint64) error {
+func (app *SolanaDApp) WithdrawFromCampaign(campaignName, campaignAddress string, amount uint64) error {
 	fmt.Printf("Withdrawing %d lamports from campaign %s\n", amount, campaignAddress)
 
 	campaignPubkey := solana.MustPublicKeyFromBase58(campaignAddress)
 
 	// Build withdraw instruction with proper discriminator
 	instructionData := generateDiscriminator("global", "withdraw")
+	// Add name length and name (u32 + string)
+	nameLen := uint32(len(campaignName))
+	nameLenBytes := make([]byte, 4)
+	for i := 0; i < 4; i++ {
+		nameLenBytes[i] = byte(nameLen >> (i * 8))
+	}
+	instructionData = append(instructionData, nameLenBytes...)
+	instructionData = append(instructionData, []byte(campaignName)...)
 	// Add amount as 8 bytes (little endian)
 	amountBytes := make([]byte, 8)
 	for i := 0; i < 8; i++ {
@@ -562,7 +610,11 @@ func (app *SolanaDApp) ShowMenu() {
 
 	// Show current campaign if available
 	if app.campaignAddress != nil {
-		fmt.Printf("Current Campaign: %s\n", app.campaignAddress.String())
+		if app.campaignName != "" {
+			fmt.Printf("Current Campaign: '%s' (%s)\n", app.campaignName, app.campaignAddress.String())
+		} else {
+			fmt.Printf("Current Campaign: %s (name unknown)\n", app.campaignAddress.String())
+		}
 	} else {
 		fmt.Println("Current Campaign: None")
 	}
@@ -620,20 +672,36 @@ func (app *SolanaDApp) Run() {
 			}
 		case "3":
 			var address string
-			if app.campaignAddress != nil {
-				fmt.Printf("Use current campaign (%s)? (y/n): ", app.campaignAddress.String())
+			var campaignName string
+
+			if app.campaignAddress != nil && app.campaignName != "" {
+				fmt.Printf("Use current campaign '%s' (%s)? (y/n): ", app.campaignName, app.campaignAddress.String())
 				response, _ := reader.ReadString('\n')
 				if strings.TrimSpace(strings.ToLower(response)) == "y" {
 					address = app.campaignAddress.String()
+					campaignName = app.campaignName
 				} else {
 					fmt.Print("Campaign address: ")
 					address, _ = reader.ReadString('\n')
 					address = strings.TrimSpace(address)
+
+					fmt.Print("Campaign name: ")
+					campaignName, _ = reader.ReadString('\n')
+					campaignName = strings.TrimSpace(campaignName)
 				}
 			} else {
 				fmt.Print("Campaign address: ")
 				address, _ = reader.ReadString('\n')
 				address = strings.TrimSpace(address)
+
+				fmt.Print("Campaign name: ")
+				campaignName, _ = reader.ReadString('\n')
+				campaignName = strings.TrimSpace(campaignName)
+			}
+
+			if campaignName == "" {
+				fmt.Println("❌ Campaign name cannot be empty.")
+				continue
 			}
 
 			fmt.Print("Amount (lamports): ")
@@ -650,7 +718,7 @@ func (app *SolanaDApp) Run() {
 				continue
 			}
 
-			if err := app.DonateToCampaign(address, amount); err != nil {
+			if err := app.DonateToCampaign(campaignName, address, amount); err != nil {
 				if strings.Contains(err.Error(), "insufficient") {
 					fmt.Println("❌ Insufficient SOL for donation. Please check your balance or request an airdrop.")
 				} else {
@@ -661,20 +729,36 @@ func (app *SolanaDApp) Run() {
 			}
 		case "4":
 			var address string
-			if app.campaignAddress != nil {
-				fmt.Printf("Use current campaign (%s)? (y/n): ", app.campaignAddress.String())
+			var campaignName string
+
+			if app.campaignAddress != nil && app.campaignName != "" {
+				fmt.Printf("Use current campaign '%s' (%s)? (y/n): ", app.campaignName, app.campaignAddress.String())
 				response, _ := reader.ReadString('\n')
 				if strings.TrimSpace(strings.ToLower(response)) == "y" {
 					address = app.campaignAddress.String()
+					campaignName = app.campaignName
 				} else {
 					fmt.Print("Campaign address: ")
 					address, _ = reader.ReadString('\n')
 					address = strings.TrimSpace(address)
+
+					fmt.Print("Campaign name: ")
+					campaignName, _ = reader.ReadString('\n')
+					campaignName = strings.TrimSpace(campaignName)
 				}
 			} else {
 				fmt.Print("Campaign address: ")
 				address, _ = reader.ReadString('\n')
 				address = strings.TrimSpace(address)
+
+				fmt.Print("Campaign name: ")
+				campaignName, _ = reader.ReadString('\n')
+				campaignName = strings.TrimSpace(campaignName)
+			}
+
+			if campaignName == "" {
+				fmt.Println("❌ Campaign name cannot be empty.")
+				continue
 			}
 
 			fmt.Print("Amount (lamports): ")
@@ -691,7 +775,7 @@ func (app *SolanaDApp) Run() {
 				continue
 			}
 
-			if err := app.WithdrawFromCampaign(address, amount); err != nil {
+			if err := app.WithdrawFromCampaign(campaignName, address, amount); err != nil {
 				if strings.Contains(err.Error(), "Unauthorized") || strings.Contains(err.Error(), "6000") {
 					fmt.Println("❌ Unauthorized: You are not the admin of this campaign.")
 				} else if strings.Contains(err.Error(), "InsufficientFunds") || strings.Contains(err.Error(), "6001") {
@@ -710,7 +794,14 @@ func (app *SolanaDApp) Run() {
 				fmt.Printf("Current balance: %.4f SOL\n", balance)
 			}
 		case "6":
-			if err := app.CheckCampaignStatus(); err != nil {
+			fmt.Print("Campaign name: ")
+			campaignName, _ := reader.ReadString('\n')
+			campaignName = strings.TrimSpace(campaignName)
+			if campaignName == "" {
+				fmt.Println("❌ Campaign name cannot be empty.")
+				continue
+			}
+			if err := app.CheckCampaignStatus(campaignName); err != nil {
 				fmt.Printf("❌ Error checking campaign status: %v\n", err)
 			}
 		case "7":
@@ -732,7 +823,7 @@ func main() {
 	}
 
 	fmt.Println("🚀 Solana dApp CLI Starting...")
-	
+
 	app, err := NewSolanaDApp(keyPath)
 	if err != nil {
 		log.Fatalf("Failed to initialize dApp: %v", err)
@@ -741,7 +832,7 @@ func main() {
 
 	fmt.Printf("✅ Connected to Solana devnet\n")
 	fmt.Printf("💳 Wallet loaded: %s\n", app.wallet.PublicKey.String())
-	
+
 	// Show initial balance
 	if balance, err := app.GetBalance(); err == nil {
 		fmt.Printf("💰 Current balance: %.4f SOL\n", balance)
@@ -749,6 +840,6 @@ func main() {
 			fmt.Println("⚠️  Low balance! You may want to request an airdrop.")
 		}
 	}
-	
+
 	app.Run()
 }
